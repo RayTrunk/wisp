@@ -69,5 +69,10 @@ try {
         }
     }
 } finally {
-    foreach ($name in $variables) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    foreach ($name in $variables) {
+        # PowerShell passes $null on as an empty string, and Wisp's test hooks
+        # see an empty variable as set, so remove the ones that weren't there.
+        if ($null -eq $saved[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
 }

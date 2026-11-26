@@ -76,6 +76,13 @@ $StartWatchMs = 5000
 $FlagPercent = 10
 $FlagFloor = 0.1
 $FlagCpuFloor = 5
+# Wisp reads a config without the dock's keys as one from before the dock,
+# and turns the dock off. These lines keep it on, at the bottom.
+$dockOn = @('dock = true', 'position = "bottom"')
+# PowerShell 7 writes no type line and warns that the switch is obsolete; 5.1
+# needs it.
+$csvOptions = @{}
+if ($PSVersionTable.PSVersion.Major -lt 6) { $csvOptions.NoTypeInformation = $true }
 
 Add-Type @"
 using System;
@@ -97,14 +104,20 @@ public static class BenchNative {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
-    // Whether any of Explorer's taskbars is visible.
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    // Whether any of Explorer's taskbars is visible. Wisp's dock keeps a
+    // window of the same class for notification icons, so only Explorer's count.
     public static bool TaskbarVisible() {
         bool any = false;
         EnumWindows((h, l) => {
             var name = new StringBuilder(64);
             GetClassNameW(h, name, 64);
             var c = name.ToString();
-            if ((c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") && IsWindowVisible(h)) any = true;
+            if ((c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") && IsWindowVisible(h)) {
+                uint pid;
+                GetWindowThreadProcessId(h, out pid);
+                try { if (System.Diagnostics.Process.GetProcessById((int)pid).ProcessName == "explorer") any = true; } catch { }
+            }
             return true;
         }, IntPtr.Zero);
         return any;
@@ -193,7 +206,11 @@ function Stop-Wisp([string]$exe, [hashtable]$environment) {
         $quit = Start-Process $exe '--quit' -PassThru -WindowStyle Hidden -RedirectStandardError $log -RedirectStandardOutput "$log.out"
         if (-not $quit.WaitForExit(10000)) { $quit.Kill() }
     } finally {
-        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        # Setting $null from PowerShell leaves an empty variable behind.
+        foreach ($name in $saved.Keys) {
+            if ($null -eq $saved[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        }
     }
 }
 
@@ -316,7 +333,7 @@ try {
     if ($canStart) {
         $config = Join-Path $startData 'wisp-nightly'
         New-Item -ItemType Directory -Force $config | Out-Null
-        'hide_taskbar = true', 'file_search = false' | Set-Content (Join-Path $config 'config.toml')
+        @('hide_taskbar = true', 'file_search = false') + $dockOn | Set-Content (Join-Path $config 'config.toml')
         New-Item -ItemType Directory -Force (Join-Path $out 'start') | Out-Null
         if (-not [BenchNative]::TaskbarVisible()) {
             Write-Warning "Explorer's taskbar is already hidden, so the start runs are skipped."
@@ -421,7 +438,7 @@ try {
 
 # --- Summary ------------------------------------------------------------------
 
-$values | Export-Csv -NoTypeInformation -LiteralPath (Join-Path $out 'metrics.csv')
+$values | ConvertTo-Csv @csvOptions | Set-Content -LiteralPath (Join-Path $out 'metrics.csv') -Encoding UTF8
 
 function Format-Value([double]$v) {
     if ([double]::IsNaN($v)) { return '-' }
